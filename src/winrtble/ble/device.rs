@@ -1,7 +1,7 @@
 use winrt::ComPtr;
 use winrt::RtAsyncOperation;
 use winrt::IInspectable;
-use winrt::windows::devices::bluetooth::{BluetoothLEDevice, IBluetoothLEDevice3, BluetoothConnectionStatus};
+use winrt::windows::devices::bluetooth::{BluetoothLEDevice, IBluetoothLEDevice2, IBluetoothLEDevice3, BluetoothAddressType, BluetoothConnectionStatus};
 use winrt::windows::devices::bluetooth::genericattributeprofile::{GattCommunicationStatus, GattDeviceServicesResult, GattDeviceService, IGattDeviceService3, GattCharacteristic};
 use winrt::windows::foundation::{TypedEventHandler, EventRegistrationToken};
 use ::Result;
@@ -35,11 +35,16 @@ impl BLEDevice {
         Ok(BLEDevice {device, connection_token })
     }
 
+    pub fn get_address_type(&self) -> Result<BluetoothAddressType> {
+        let device2 = self.device.query_interface::<IBluetoothLEDevice2>().ok_or_else(|| Error::NotSupported("Interface not implemented".into()))?;
+        let address_type = device2.get_bluetooth_address_type()?;
+        Ok(address_type)
+    }
+
     fn get_gatt_services(&self) -> Result<ComPtr<GattDeviceServicesResult>> {
-        let winrt_error = |e| Error::Other(format!("{:?}", e));
         let device3 = self.device.query_interface::<IBluetoothLEDevice3>().ok_or_else(|| Error::NotSupported("Interface not implemented".into()))?;
-        let async_op = device3.get_gatt_services_async().map_err(winrt_error)?;
-        let service_result = async_op.blocking_get().map_err(winrt_error)?.ok_or_else(|| Error::NotSupported("Interface not implemented".into()))?;
+        let async_op = device3.get_gatt_services_async()?;
+        let service_result = async_op.blocking_get()?.ok_or_else(|| Error::NotSupported("Interface not implemented".into()))?;
         Ok(service_result)
     }
 
@@ -94,12 +99,11 @@ impl BLEDevice {
     }
 
     pub fn discover_characteristics(&self) -> Result<Vec<ComPtr<GattCharacteristic>>> {
-        let winrt_error = |e| Error::Other(format!("{:?}", e));
         let service_result = self.get_gatt_services()?;
-        let status = service_result.get_status().map_err(winrt_error)?;
+        let status = service_result.get_status()?;
         if status == GattCommunicationStatus::Success {
             let mut characteristics = Vec::new();
-            if let Some(services) = service_result.get_services().map_err(winrt_error)? {
+            if let Some(services) = service_result.get_services()? {
                 println!("services {:?}", services.get_size());
                 for service in &services {
                     if let Some(service) = service {

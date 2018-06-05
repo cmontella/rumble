@@ -125,3 +125,13 @@ pub enum Error {
 
 // Rumble Result type
 pub type Result<T> = result::Result<T, Error>;
+
+#[cfg(target_os = "windows")]
+use winrt::Error as WinRTError;
+
+#[cfg(target_os = "windows")]
+impl From<WinRTError> for Error {
+    fn from(e: WinRTError) -> Error {
+        Error::Other(format!("{:?}", e))
+    }
+}

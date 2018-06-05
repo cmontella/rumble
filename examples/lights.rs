@@ -1,4 +1,4 @@
-extern crate rumble;
+/*extern crate rumble;
 extern crate rand;
 
 use std::thread;
@@ -49,4 +49,4 @@ pub fn main() {
         light.command(&cmd_char, &color_cmd).unwrap();
         thread::sleep(Duration::from_millis(200));
     }
-}
+}*/

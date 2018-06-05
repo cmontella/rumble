@@ -50,39 +50,49 @@ impl Peripheral {
 
     pub fn update_properties(&self, args: &BluetoothLEAdvertisementReceivedEventArgs) {
         let mut properties = self.properties.lock().unwrap();
-        let advertisement = args.get_advertisement().unwrap().unwrap();
-        properties.local_name = advertisement.get_local_name().ok().and_then(|n| 
-            if !n.is_empty() {
-                Some(n.to_string()) 
-            } else {
-                None 
-            }
-        );
-
         properties.discovery_count += 1;
         // windows does not provide the address type in the advertisement event args but only in the device object
         // https://social.msdn.microsoft.com/Forums/en-US/c71d51a2-56a1-425a-9063-de44fda48766/bluetooth-address-public-or-random?forum=wdk
         properties.address_type = AddressType::default();
-        properties.has_scan_response = args.get_advertisement_type().unwrap() == BluetoothLEAdvertisementType::ScanResponse;
+        properties.has_scan_response = args.get_advertisement_type().map(|t| t == BluetoothLEAdvertisementType::ScanResponse).unwrap_or(false);
         properties.tx_power_level = args.get_raw_signal_strength_in_dbm().ok().map(|rssi| rssi as i8);
-        properties.manufacturer_data = if let Ok(Some(manufacturer_data)) = advertisement.get_manufacturer_data() {
-            let mut data = Vec::new();
-            for i in &manufacturer_data {
-                let d = i.unwrap();
-                let company_id = d.get_company_id().unwrap();
-                let buffer = d.get_data().unwrap().unwrap();
-                let reader = DataReader::from_buffer(&buffer).unwrap().unwrap();
-                let len = reader.get_unconsumed_buffer_length().unwrap() as usize;
-                let mut input = vec![0u8; len + 2];
-                reader.read_bytes(&mut input[2..(len+2)]).unwrap();
-                input[0] = company_id as u8;
-                input[1] = (company_id >> 8) as u8;
-                data.append(&mut input);
+
+        if let Ok(Some(advertisement)) = args.get_advertisement() {
+            if let Ok(local_name) = advertisement.get_local_name() {
+                properties.local_name = Some(local_name.to_string());
             }
-            Some(data)
-        } else {
-            None
-        };
+            properties.manufacturer_data = if let Ok(Some(manufacturer_data)) = advertisement.get_manufacturer_data() {
+                let mut data = Vec::new();
+                manufacturer_data.into_iter().filter_map(|d| {
+                    d.and_then(|d| {
+                        match (d.get_company_id(), d.get_data()) {
+                            (Ok(company_id), Ok(Some(buffer))) => {
+                                Some((company_id, buffer))
+                            },
+                            _ => {
+                                None
+                            }
+                        }})
+                }).filter_map(|(company_id, buffer)| {
+                    if let Ok(Some(reader)) = DataReader::from_buffer(&buffer) {
+                        Some((company_id, reader))
+                    } else {
+                        None
+                    }
+                }).for_each(|(company_id, reader)| {
+                    let len = reader.get_unconsumed_buffer_length().unwrap_or(0u32) as usize;
+                    let mut input = vec![0u8; len + 2];
+                    if reader.read_bytes(&mut input[2..(len+2)]).is_ok() {
+                        input[0] = company_id as u8;
+                        input[1] = (company_id >> 8) as u8;
+                        data.append(&mut input);
+                    }
+                });
+                Some(data)
+            } else {
+                None
+            };
+        }
     }
 }
 
@@ -138,6 +148,11 @@ impl ApiPeripheral for Peripheral {
         let device = BLEDevice::new(self.address, Box::new(move |is_connected| {
             connected.store(is_connected, Ordering::Relaxed);
         }))?;
+        
+        if let Ok(address_type) = device.get_address_type() {
+            let mut properties = self.properties.lock().unwrap();
+            properties.address_type = utils::to_address_type(&address_type);
+        }
 
         device.connect()?;
         let mut d = self.device.lock().unwrap();
@@ -161,13 +176,27 @@ impl ApiPeripheral for Peripheral {
             let mut ble_characteristics = self.ble_characteristics.lock().unwrap();
             let characteristics = device.discover_characteristics()?;
             for characteristic in characteristics {
-                let uuid = utils::to_uuid(&characteristic.get_uuid().unwrap());
-                let properties = utils::to_char_props(&characteristic.get_characteristic_properties().unwrap());
-                let chara = Characteristic { uuid, start_handle: 0, end_handle: 0, value_handle: 0, properties };
-                characteristics_result.push(chara);
-                ble_characteristics.entry(uuid).or_insert_with(|| {
-                    BLECharacteristic::new(characteristic)
-                });
+                match &characteristic.get_uuid() {
+                    Ok(uuid) => {
+                        match &characteristic.get_characteristic_properties() {
+                            Ok(properties) => {
+                                let uuid = utils::to_uuid(uuid);
+                                let properties = utils::to_char_props(properties);
+                                let chara = Characteristic { uuid, start_handle: 0, end_handle: 0, value_handle: 0, properties };
+                                characteristics_result.push(chara);
+                                ble_characteristics.entry(uuid).or_insert_with(|| {
+                                    BLECharacteristic::new(characteristic)
+                                });
+                            },
+                            Err(e) => {
+                                println!("get_characteristic_properties failed {:?} {:?}", uuid, e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("get_uuid failed {:?}", e);
+                    }
+                }
             }
             return Ok(characteristics_result);
         }
@@ -210,8 +239,14 @@ impl ApiPeripheral for Peripheral {
     /// characteristic and for the specified declaration UUID. See
     /// [here](https://www.bluetooth.com/specifications/gatt/declarations) for valid UUIDs.
     /// Takes an optional callback that will be called with an error or the device response.
-    fn read_by_type_async(&self, _characteristic: &Characteristic,
-                          _uuid: UUID, _handler: Option<RequestCallback>) {
+    fn read_by_type_async(&self, characteristic: &Characteristic,
+                          _uuid: UUID, handler: Option<RequestCallback>) {
+        let ble_characteristics = self.ble_characteristics.lock().unwrap();
+        if let Some(ble_characteristic) = ble_characteristics.get(&characteristic.uuid) {
+            ble_characteristic.read_value_async(handler);
+        } else if let Some(ref handler) = handler {
+            handler(Err(Error::Other("characteristic not found".into())));
+        }
     }
 
     /// Sends a read-by-type request to device for the range of handles covered by the
@@ -223,8 +258,8 @@ impl ApiPeripheral for Peripheral {
         let ble_characteristics = self.ble_characteristics.lock().unwrap();
         if let Some(ble_characteristic) = ble_characteristics.get(&characteristic.uuid) {
             return ble_characteristic.read_value();
-        } else 
-            Err(Error::NotSupported("read_by_type".into()))
+        } else {
+            Err(Error::Other("characteristic not found".into()))
         }
     }
 
@@ -240,7 +275,7 @@ impl ApiPeripheral for Peripheral {
                 handlers.iter().for_each(|h| h(notification.clone()));
             }))
         } else {
-            Err(Error::NotSupported("subscribe".into()))
+            Err(Error::Other("characteristic not found".into()))
         }
     }
 
@@ -251,7 +286,7 @@ impl ApiPeripheral for Peripheral {
         if let Some(ble_characteristic) = ble_characteristics.get_mut(&characteristic.uuid) {
             ble_characteristic.unsubscribe()
         } else {
-            Err(Error::NotSupported("unsubscribe".into()))
+            Err(Error::Other("characteristic not found".into()))
         }
     }
 

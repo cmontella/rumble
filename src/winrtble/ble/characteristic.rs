@@ -1,10 +1,13 @@
 use ::Result;
 use ::Error;
 use winrt::ComPtr;
-use winrt::windows::devices::bluetooth::genericattributeprofile::{GattCommunicationStatus, GattCharacteristic, GattValueChangedEventArgs, GattClientCharacteristicConfigurationDescriptorValue};
+use winrt::windows::devices::bluetooth::genericattributeprofile::{GattReadResult, GattCommunicationStatus, GattCharacteristic, GattValueChangedEventArgs, GattClientCharacteristicConfigurationDescriptorValue};
 use winrt::windows::storage::streams::DataReader;
 use winrt::RtAsyncOperation;
 use winrt::windows::foundation::{ TypedEventHandler, EventRegistrationToken };
+use winrt::windows::foundation::{AsyncOperationCompletedHandler, IAsyncOperation, AsyncStatus};
+use api::RequestCallback;
+use winrt::Result as WinRTResult;
 
 pub type NotifiyEventHandler = Box<Fn(Vec<u8>) + Send>;
 
@@ -16,22 +19,58 @@ pub struct BLECharacteristic {
 unsafe impl Send for BLECharacteristic {}
 unsafe impl Sync for BLECharacteristic {}
 
+/*impl<T> Into<Result<T>> for WinRTResult<T> {
+    fn into(self) -> Result<T> {
+        Err(Error::DeviceNotFound)
+    }
+}*/
+
 impl BLECharacteristic {
     pub fn new(characteristic: ComPtr<GattCharacteristic>) -> Self {
         BLECharacteristic { characteristic, notify_token: None }
     }
 
-    pub fn read_value(&self) -> Result<Vec<u8>> {
-        let result = self.characteristic.read_value_async().unwrap().blocking_get().unwrap().unwrap();
-        if result.get_status().unwrap() == GattCommunicationStatus::Success {
-            let value = result.get_value().unwrap().unwrap();
-            let reader = DataReader::from_buffer(&value).unwrap().unwrap();
-            let len = reader.get_unconsumed_buffer_length().unwrap() as usize;
+    fn value_from_read_result(result: &ComPtr<GattReadResult>) -> Result<Vec<u8>> {
+        if result.get_status()? == GattCommunicationStatus::Success {
+            let value = result.get_value()?.unwrap();
+            let reader = DataReader::from_buffer(&value)?.unwrap();
+            let len = reader.get_unconsumed_buffer_length()? as usize;
             let mut input = vec![0u8; len];
-            reader.read_bytes(&mut input[0..len]).unwrap();
+            reader.read_bytes(&mut input[0..len])?;
             Ok(input)
         } else {
             Err(Error::NotSupported("get_status".into()))
+        }
+    }
+
+    pub fn read_value(&self) -> Result<Vec<u8>> {
+        let result = self.characteristic.read_value_async()?.blocking_get()?.unwrap();
+        Self::value_from_read_result(&result)
+    }
+
+    pub fn read_value_async(&self, callback: Option<RequestCallback>) {
+        match self.characteristic.read_value_async() {
+            Ok(async_op) => {
+                let handler = AsyncOperationCompletedHandler::new(move |op, status| {
+                    let result = if status == AsyncStatus::Completed {
+                        let async_op : &IAsyncOperation<GattReadResult> = unsafe { (&*op) };
+                        let result = async_op.get_results().unwrap().unwrap();
+                        Self::value_from_read_result(&result)
+                    } else {
+                        Err(Error::Other(format!("AsyncStatus {:?}", status)))
+                    };
+                    if let Some(ref callback) = callback {
+                        callback(result);
+                    }
+                    Ok(())
+                });
+                async_op.set_completed(&handler).expect("set_completed failed");
+            },
+            Err(e) => {
+                if let Some(ref callback) = callback {
+                    callback(Err(e.into()));
+                }
+            }
         }
     }
 

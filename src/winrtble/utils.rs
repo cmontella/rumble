@@ -1,7 +1,9 @@
 use api::BDAddr;
 use api::UUID;
+use api::AddressType;
 use winrt::Guid;
 use api::CharPropFlags;
+use winrt::windows::devices::bluetooth::{BluetoothAddressType};
 use winrt::windows::devices::bluetooth::genericattributeprofile::{GattCharacteristicProperties, GattCommunicationStatus};
 use ::Error;
 use ::Result;
@@ -95,6 +97,20 @@ fn guid_to_string(guid: &Guid) -> String {
 
 pub fn to_char_props(properties: &GattCharacteristicProperties) -> CharPropFlags {
     CharPropFlags::from_bits_truncate(properties.0 as u8)
+}
+
+pub fn to_address_type(address_type: &BluetoothAddressType) -> AddressType {
+    match address_type {
+        &BluetoothAddressType::Random => {
+            AddressType::Random
+        },
+        &BluetoothAddressType::Public => {
+            AddressType::Public
+        },
+        &BluetoothAddressType(_) => {
+            AddressType::default()
+        }
+    }
 }
 
 #[cfg(test)]
